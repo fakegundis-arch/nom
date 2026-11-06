@@ -8,7 +8,8 @@ from dotenv import load_dotenv
 
 
 def _get(name: str, default: str | None = None, required: bool = False) -> str:
-    value = os.environ.get(name, default)
+    # A blank line in .env (e.g. "SELL_MIN_PRICE=") means "use the default".
+    value = os.environ.get(name) or default
     if required and not value:
         raise RuntimeError(f"Missing required setting: {name}")
     return value or ""
@@ -37,6 +38,38 @@ class AdSettings:
     buy_max_order: Decimal = Decimal("0")         # cap on one BUY order in naira (0 = no cap)
     token: str = "USDT"
     currency: str = "NGN"
+
+
+@dataclass(frozen=True)
+class AutoSettings:
+    """Automatic release and payment. Both need MONITOR_ONLY=false as well."""
+
+    auto_release: bool = False              # release USDT when the buyer's payment is confirmed
+    auto_pay: bool = False                  # pay sellers from Nomba and mark the order paid
+    max_order: Decimal = Decimal("500000")  # bigger orders wait for /release or /pay from you
+    new_counterparty_max: Decimal = Decimal("100000")  # cap for people you've never traded with
+    daily_limit: Decimal = Decimal("5000000")          # total naira the bot may handle alone per day
+
+
+@dataclass(frozen=True)
+class RefillSettings:
+    """Turn USDT into naira through Nomba when naira runs low."""
+
+    auto_refill: bool = False
+    target_naira: Decimal = Decimal("2000000")   # refill up to this much free naira
+    min_rate: Decimal = Decimal("0")             # never convert below this many naira per USDT
+    min_usdt: Decimal = Decimal("20")            # don't bother converting less than this
+    max_usdt_per_day: Decimal = Decimal("1000")
+    check_seconds: int = 300
+    # Nomba Global Payout fields for the USDT -> NGN exchange.
+    business_name: str = ""                      # your business name, sent as sender/receiver
+    source_country: str = "NG"
+    # Optional: let the bot move USDT from Bybit to your Nomba USDT address.
+    # Uses a SEPARATE Bybit key that can only withdraw to whitelisted addresses.
+    bybit_withdraw_key: str = ""
+    bybit_withdraw_secret: str = ""
+    nomba_usdt_address: str = ""
+    nomba_usdt_chain: str = "TRX"
 
 
 @dataclass(frozen=True)
@@ -72,6 +105,8 @@ class Settings:
     monitor_only: bool
 
     ads: AdSettings = AdSettings()
+    auto: AutoSettings = AutoSettings()
+    refill: RefillSettings = RefillSettings()
 
 
 def load_ad_settings() -> AdSettings:
@@ -86,6 +121,33 @@ def load_ad_settings() -> AdSettings:
         min_competitor_usdt=Decimal(_get("MIN_COMPETITOR_USDT", "50")),
         naira_buffer=Decimal(_get("NAIRA_BUFFER", "100000")),
         buy_max_order=Decimal(_get("BUY_MAX_ORDER", "0")),
+    )
+
+
+def load_auto_settings() -> AutoSettings:
+    return AutoSettings(
+        auto_release=_bool("AUTO_RELEASE", False),
+        auto_pay=_bool("AUTO_PAY", False),
+        max_order=Decimal(_get("AUTO_MAX_ORDER", "500000")),
+        new_counterparty_max=Decimal(_get("AUTO_NEW_COUNTERPARTY_MAX", "100000")),
+        daily_limit=Decimal(_get("AUTO_DAILY_LIMIT", "5000000")),
+    )
+
+
+def load_refill_settings() -> RefillSettings:
+    return RefillSettings(
+        auto_refill=_bool("AUTO_REFILL", False),
+        target_naira=Decimal(_get("REFILL_TARGET_NAIRA", "2000000")),
+        min_rate=Decimal(_get("REFILL_MIN_RATE", "0")),
+        min_usdt=Decimal(_get("REFILL_MIN_USDT", "20")),
+        max_usdt_per_day=Decimal(_get("REFILL_MAX_USDT_PER_DAY", "1000")),
+        check_seconds=int(_get("REFILL_CHECK_SECONDS", "300")),
+        business_name=_get("BUSINESS_NAME", ""),
+        source_country=_get("REFILL_SOURCE_COUNTRY", "NG"),
+        bybit_withdraw_key=_get("BYBIT_WITHDRAW_API_KEY", ""),
+        bybit_withdraw_secret=_get("BYBIT_WITHDRAW_API_SECRET", ""),
+        nomba_usdt_address=_get("NOMBA_USDT_ADDRESS", ""),
+        nomba_usdt_chain=_get("NOMBA_USDT_CHAIN", "TRX"),
     )
 
 
@@ -112,4 +174,6 @@ def load_settings() -> Settings:
         usdt_low_threshold=Decimal(_get("USDT_LOW_THRESHOLD", "300")),
         monitor_only=_bool("MONITOR_ONLY", True),
         ads=load_ad_settings(),
+        auto=load_auto_settings(),
+        refill=load_refill_settings(),
     )

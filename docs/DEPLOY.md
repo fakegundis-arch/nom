@@ -58,6 +58,19 @@ Where each value comes from:
 | `TELEGRAM_BOT_TOKEN` | Telegram → @BotFather → `/newbot` |
 | `TELEGRAM_CHAT_ID` | Send any message to @userinfobot; it replies with your id. Then send `/start` to your new bot. |
 
+### Optional: the refill withdraw key
+
+Only if you want the bot to move USDT from Bybit to Nomba by itself:
+
+1. In Nomba, find your **USDT deposit address** and its network (e.g. TRC20 / `TRX`).
+2. In Bybit → Withdrawal address book, add that address and turn on
+   **withdrawal whitelist** so Bybit only allows withdrawals to saved addresses.
+3. Create a **second** API key with only the **Withdraw** permission,
+   restricted to the VPS IP. Put it in `BYBIT_WITHDRAW_API_KEY` /
+   `BYBIT_WITHDRAW_API_SECRET`, and the address in `NOMBA_USDT_ADDRESS`.
+
+Keep the main trading key **without** withdrawal permission.
+
 ## 4. Start it
 
 ```bash

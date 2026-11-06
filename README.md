@@ -3,11 +3,16 @@
 A bot for running a USDT/NGN merchant desk on Bybit P2P, using a Nomba
 Business account as the naira account.
 
-## Current stage: Phase 1, monitor only
+## Modes
 
-Phase 1 **never moves money**. While `MONITOR_ONLY=true` (the default), the
-code that releases crypto, marks orders paid or sends transfers refuses to
-run. The bot watches and tells you what to do on Telegram:
+- **Monitor only** (`MONITOR_ONLY=true`, the default): the bot **never moves
+  money**. The code that releases crypto, sends transfers, converts or
+  withdraws refuses to run. It watches and tells you what to do.
+- **Live** (`MONITOR_ONLY=false`): each automatic action has its own switch,
+  all off by default: `AUTO_RELEASE`, `AUTO_PAY`, `AUTO_REFILL` (and
+  `AUTO_ADS` for ad prices). Turn them on one at a time.
+
+What it does in monitor-only mode:
 
 | Situation | What the bot does |
 |---|---|
@@ -20,8 +25,63 @@ run. The bot watches and tells you what to do on Telegram:
 | Naira or USDT balance gets low | 📉 alert (and 📈 when it recovers) |
 | Any naira credit into Nomba | 💰 alert |
 
-Telegram commands (only from your own chat): `/status`, `/balance`,
-`/prices`, `/pause`, `/resume`, `/help`.
+## Automatic release and payment
+
+**SELL orders (`AUTO_RELEASE`)**: when the buyer's payment has really arrived
+in Nomba, for the exact amount, from a name that matches their Bybit KYC
+name, the bot releases the USDT. Third-party payments are never released
+automatically.
+
+**BUY orders (`AUTO_PAY`)**: the bot looks up the seller's bank account with
+Nomba. If the account holder's name matches the seller's KYC name and you
+have the naira, it sends the transfer, waits for Nomba to confirm it, then
+marks the order paid on Bybit.
+
+Limits on every automatic action:
+
+| Setting | Meaning |
+|---|---|
+| `AUTO_MAX_ORDER` | Bigger orders wait for you (`/release ID`, `/pay ID`) |
+| `AUTO_NEW_COUNTERPARTY_MAX` | Lower cap for people you've never completed a trade with |
+| `AUTO_DAILY_LIMIT` | Total naira the bot may handle alone per day |
+
+**A seller is never paid twice.** Each BUY order gets one payout record and
+one Nomba reference (`bybit-p2p-ORDER_ID`) *before* money moves. If a
+transfer's result is unclear (timeout, dropped connection), the bot asks Nomba
+about that reference instead of sending again.
+
+If a BUY order is cancelled after the bot paid, you get a 🚨 alert at once.
+
+## Naira refill through Nomba (`AUTO_REFILL`)
+
+When free naira (Nomba balance minus naira owed on open BUY orders) falls
+below `NAIRA_LOW_THRESHOLD`:
+
+1. If your **Nomba USDT wallet** holds USDT, the bot gets a locked quote and,
+   if the rate is at least `REFILL_MIN_RATE`, converts enough USDT to get back
+   to `REFILL_TARGET_NAIRA` (max `REFILL_MAX_USDT_PER_DAY`).
+2. If that wallet is empty and you've set the optional withdraw key, it sends
+   USDT from Bybit to your Nomba USDT address (never below
+   `USDT_LOW_THRESHOLD` on Bybit), then converts it when it lands.
+3. Otherwise it tells you to move USDT yourself.
+
+This uses Nomba's Global Payout endpoints (`/v1/global-payout/money/convert`
+and `/v1/global-payout/exchange/authorize`), as in Nomba's official SDK.
+**Confirm with Nomba that your account has a USDT wallet** and test it in the
+sandbox first.
+
+## Telegram commands
+
+Only your own chat is answered.
+
+| Command | Does |
+|---|---|
+| `/status` | Mode, balances, today's automatic total, naira owed |
+| `/stop` / `/go` | Halt or resume ALL automatic releases, payments and refills |
+| `/release ID` | Release a SELL order the bot held back |
+| `/pay ID` | Pay a BUY order the bot held back |
+| `/refill` | Try a naira refill now |
+| `/prices`, `/pause`, `/resume` | Ad pricing plan; stop or restart ad changes |
 
 ## Ad pricing and inventory
 
@@ -59,13 +119,16 @@ ads alone and tells you.
   matches and can't be counted twice. Resent webhooks are ignored.
 - **Exact amount, inside the payment window** (default 30 minutes).
 - **Replay protection.** Webhooks older than 5 minutes are rejected.
-- **Bybit key without withdrawals**, locked to the VPS IP.
+- **Main Bybit key without withdrawals**, locked to the VPS IP. Refill
+  withdrawals use a separate key that can only send to whitelisted addresses.
 
 ## Layout
 
 ```
 p2pbot/
-  bot.py           main loop, webhook listener, alerts
+  bot.py           main loop, webhook listener, alerts, Telegram commands
+  autopilot.py     automatic release and payment, limits, approvals
+  refill.py        USDT -> naira refills through Nomba
   ads.py           ad repricing and naira/USDT inventory
   bybit_client.py  Bybit P2P API (signed requests; paths from Bybit's pybit SDK)
   nomba_client.py  Nomba API (token, balance, name lookup, transactions, transfers)
@@ -74,7 +137,7 @@ p2pbot/
   db.py            SQLite: orders, credits, audit log
   telegram.py      alerts and commands
   config.py        settings from .env
-tests/             49 tests, including Nomba's documented webhook signature vector
+tests/             75 tests, including Nomba's documented webhook signature vector
 docs/DEPLOY.md     VPS setup step by step
 ```
 
@@ -90,11 +153,15 @@ python3 -m venv .venv
 
 See [docs/DEPLOY.md](docs/DEPLOY.md).
 
-## Before turning on real money (later phases)
+## Going live: do it in this order
 
-1. Nomba's **written confirmation** that crypto P2P is allowed on your account.
-2. Phase 1 running for a while with alerts that match what you see in Bybit and Nomba.
-3. Check these against Nomba's and Bybit's live docs (they were taken from
+1. Run in monitor-only mode against **Nomba sandbox** keys until alerts match
+   what you see in Bybit and Nomba.
+2. Switch to live Nomba keys, still `MONITOR_ONLY=true`, for a few days.
+3. `MONITOR_ONLY=false` and `AUTO_RELEASE=true` with **small** limits
+   (e.g. `AUTO_MAX_ORDER=50000`, `AUTO_DAILY_LIMIT=300000`).
+4. Then `AUTO_PAY=true`, then `AUTO_REFILL=true`. Raise limits slowly.
+5. Check these against Nomba's and Bybit's live docs (they were taken from
    official SDKs and docs, but not yet tried against a live account):
    - Bybit order fields (`buyerRealName`, `sellerRealName`, `paymentTermList`) and status codes.
    - Bybit ad fields (`priceType` 0 = fixed, `paymentTerms[].id`, `lastQuantity`,

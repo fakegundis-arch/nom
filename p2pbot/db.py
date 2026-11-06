@@ -39,6 +39,24 @@ CREATE TABLE IF NOT EXISTS events (
     order_id  TEXT,
     message   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS payouts (
+    order_id      TEXT PRIMARY KEY,
+    reference     TEXT NOT NULL UNIQUE,
+    amount        TEXT NOT NULL,
+    account_no    TEXT NOT NULL,
+    bank_code     TEXT NOT NULL,
+    account_name  TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    marked_paid   INTEGER NOT NULL DEFAULT 0,
+    updated_at    REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS auto_actions (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    day       TEXT NOT NULL,
+    kind      TEXT NOT NULL,
+    order_id  TEXT,
+    amount    TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -130,6 +148,48 @@ class Database:
             (order_id, txn_id),
         )
         return bool(rows)
+
+    def completed_trades_with(self, counterparty: str) -> int:
+        rows = self._exec("SELECT COUNT(*) AS n FROM orders WHERE counterparty = ? AND status = 50",
+                          (counterparty,))
+        return rows[0]["n"]
+
+    # --- payouts to sellers (one row per BUY order, so a seller is never paid twice) ---
+
+    def claim_payout(self, order_id: str, reference: str, amount: Decimal, account_no: str,
+                     bank_code: str, account_name: str) -> bool:
+        """Record that we're about to pay. False if this order already has a payout."""
+        rows = self._exec(
+            """INSERT OR IGNORE INTO payouts (order_id, reference, amount, account_no, bank_code, account_name,
+                                             status, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'sending', ?) RETURNING order_id""",
+            (order_id, reference, str(amount), account_no, bank_code, account_name, time.time()),
+        )
+        return bool(rows)
+
+    def payout(self, order_id: str) -> sqlite3.Row | None:
+        rows = self._exec("SELECT * FROM payouts WHERE order_id = ?", (order_id,))
+        return rows[0] if rows else None
+
+    def set_payout_status(self, order_id: str, status: str) -> None:
+        self._exec("UPDATE payouts SET status = ?, updated_at = ? WHERE order_id = ?",
+                   (status, time.time(), order_id))
+
+    def set_payout_marked_paid(self, order_id: str) -> None:
+        self._exec("UPDATE payouts SET marked_paid = 1, updated_at = ? WHERE order_id = ?",
+                   (time.time(), order_id))
+
+    # --- automatic actions, for daily limits ---
+
+    def record_auto(self, kind: str, amount: Decimal, order_id: str | None = None) -> None:
+        self._exec("INSERT INTO auto_actions (day, kind, order_id, amount) VALUES (?, ?, ?, ?)",
+                   (time.strftime("%Y-%m-%d"), kind, order_id, str(amount)))
+
+    def auto_total_today(self, kinds: tuple[str, ...]) -> Decimal:
+        marks = ",".join("?" * len(kinds))
+        rows = self._exec(f"SELECT amount FROM auto_actions WHERE day = ? AND kind IN ({marks})",
+                          (time.strftime("%Y-%m-%d"), *kinds))
+        return sum((Decimal(r["amount"]) for r in rows), Decimal("0"))
 
     # --- small key/value store for alert state ---
 

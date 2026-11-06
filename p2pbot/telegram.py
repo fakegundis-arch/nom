@@ -23,7 +23,7 @@ class Telegram:
             # An alert failing must never crash the bot.
             log.error("Telegram send failed: %s", exc)
 
-    def handle_commands(self, handlers: dict[str, Callable[[], str]]) -> None:
+    def handle_commands(self, handlers: dict[str, Callable[[str], str]]) -> None:
         """Answer commands from YOUR chat only; messages from anyone else are ignored."""
         try:
             resp = self.http.get(self.base + "/getUpdates",
@@ -38,7 +38,10 @@ class Telegram:
             message = update.get("message") or {}
             if str(message.get("chat", {}).get("id")) != self.chat_id:
                 continue
-            command = (message.get("text") or "").split()[0].split("@")[0].lower() if message.get("text") else ""
+            words = (message.get("text") or "").split(maxsplit=1)
+            if not words:
+                continue
+            command = words[0].split("@")[0].lower()
             handler = handlers.get(command)
             if handler:
-                self.send(handler())
+                self.send(handler(words[1] if len(words) > 1 else ""))

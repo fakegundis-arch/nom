@@ -99,7 +99,7 @@ def test_sell_order_paid_by_buyer_is_confirmed_once():
     bot.process_order(sell_order(STATUS_WAITING_SELLER_RELEASE))
     confirmations = [m for m in bot.tg.sent if "payment confirmed" in m]
     assert len(confirmations) == 1
-    assert "release the USDT yourself" in confirmations[0]
+    assert "Release in Bybit or send /release o1" in confirmations[0]
 
 
 def test_sell_order_paid_by_stranger_needs_review():

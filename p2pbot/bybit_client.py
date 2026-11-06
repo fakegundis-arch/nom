@@ -40,6 +40,8 @@ class PaymentTerm:
     real_name: str
     account_no: str
     bank_name: str
+    id: str = ""            # needed to mark an order paid
+    payment_type: str = ""
 
 
 @dataclass
@@ -76,6 +78,8 @@ def parse_order(raw: dict[str, Any]) -> P2POrder:
                 real_name=term.get("realName", ""),
                 account_no=term.get("accountNo", ""),
                 bank_name=term.get("bankName", ""),
+                id=str(term.get("id", "")),
+                payment_type=str(term.get("paymentType", "")),
             )
         )
     return P2POrder(
@@ -196,3 +200,13 @@ class BybitP2PClient:
             "/v5/p2p/order/pay",
             {"orderId": order_id, "paymentType": payment_type, "paymentId": payment_id},
         )
+
+    def withdraw(self, coin: str, chain: str, address: str, amount: Decimal) -> str:
+        """Send crypto out of the Funding account. Bybit only allows API
+        withdrawals to addresses already in your whitelisted address book."""
+        self._guard("withdraw")
+        result = self._post("/v5/asset/withdraw/create", {
+            "coin": coin, "chain": chain, "address": address, "amount": f"{amount:f}",
+            "timestamp": int(time.time() * 1000), "forceChain": 1, "accountType": "FUND",
+        })
+        return str(result.get("id", ""))

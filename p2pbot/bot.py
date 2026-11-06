@@ -1,7 +1,9 @@
-"""Phase 1 bot: watch Bybit P2P orders and Nomba credits, match them, alert on Telegram.
+"""The bot: watch Bybit P2P orders and Nomba credits, match them, act or alert on Telegram.
 
-It never releases crypto or sends money: while MONITOR_ONLY is on, the
-clients refuse to. You act on its alerts by hand.
+While MONITOR_ONLY is on (the default) it never releases crypto or sends
+money: the clients refuse to. With MONITOR_ONLY=false, AUTO_RELEASE /
+AUTO_PAY / AUTO_REFILL each switch on one kind of automatic action, inside
+the limits in autopilot.py and refill.py.
 """
 
 import logging
@@ -14,13 +16,15 @@ import requests
 
 from . import webhook
 from .ads import AdManager
+from .autopilot import Autopilot, find_bank_code
 from .bybit_client import (SIDE_BUY, SIDE_SELL, STATUS_APPEALING, STATUS_CANCELLED, STATUS_FINISHED,
                            STATUS_WAITING_BUYER_PAY, STATUS_WAITING_SELLER_RELEASE, BybitError,
                            BybitP2PClient, P2POrder)
 from .config import Settings, load_settings
 from .db import Database
-from .matcher import Decision, compare_names, match_sell_order, name_words
+from .matcher import Decision, match_sell_order
 from .nomba_client import NombaClient, NombaError
+from .refill import Refiller
 from .telegram import Telegram
 
 log = logging.getLogger("p2pbot")
@@ -28,23 +32,12 @@ log = logging.getLogger("p2pbot")
 BALANCE_CHECK_SECONDS = 60
 CONFIRMED_STATUSES = {"SUCCESS", "PAYMENT_SUCCESSFUL"}
 
-
-def find_bank_code(bank_name: str, banks: list[dict[str, str]]) -> str | None:
-    """Match a bank name typed by a Bybit user ("GTBank", "Guaranty Trust") to a Nomba bank code."""
-    wanted = name_words(bank_name)
-    if not wanted:
-        return None
-    best, best_score = None, 0
-    for bank in banks:
-        score = len(wanted & name_words(bank.get("name", "")))
-        if score > best_score:
-            best, best_score = bank.get("code"), score
-    return best
+__all__ = ["Bot", "find_bank_code", "main"]
 
 
 class Bot:
     def __init__(self, settings: Settings, bybit: BybitP2PClient, nomba: NombaClient,
-                 db: Database, telegram: Telegram):
+                 db: Database, telegram: Telegram, withdrawer: BybitP2PClient | None = None):
         self.s = settings
         self.bybit = bybit
         self.nomba = nomba
@@ -56,6 +49,9 @@ class Bot:
         self.webhook_tolerance: float | None = webhook.TOLERANCE_SECONDS
         self.ads = AdManager(settings.ads, bybit, db, telegram,
                              settings.naira_low_threshold, settings.usdt_low_threshold)
+        self.autopilot = Autopilot(settings.auto, settings.monitor_only, bybit, nomba, db)
+        self.refiller = Refiller(settings.refill, settings.monitor_only, nomba, db, telegram,
+                                 settings.naira_low_threshold, settings.usdt_low_threshold, withdrawer)
 
     # --- alerts ---
 
@@ -114,7 +110,14 @@ class Bot:
             self.notify_once(oid, "appeal", f"🚨 Order {oid} is under APPEAL ({summary}, {who}). Handle it in Bybit.")
         elif order.status in (STATUS_CANCELLED, STATUS_FINISHED):
             label = "cancelled" if order.status == STATUS_CANCELLED else "completed"
-            self.notify_once(oid, label, f"Order {oid} {label}.")
+            payout = self.db.payout(oid) if order.side == SIDE_BUY else None
+            if order.status == STATUS_CANCELLED and payout and payout["status"] not in ("REFUND", "CANCELLED"):
+                self.notify_once(oid, "cancelled_after_pay",
+                                 f"🚨 BUY {oid} was CANCELLED but the bot sent ₦{payout['amount']} to "
+                                 f"{payout['account_name']} (status {payout['status']}). Contact the seller / "
+                                 f"Bybit support now to get the USDT or the money back.")
+            else:
+                self.notify_once(oid, label, f"Order {oid} {label}.")
         elif order.side == SIDE_SELL:
             self._process_sell(order, who, summary)
         elif order.side == SIDE_BUY:
@@ -127,6 +130,11 @@ class Bot:
             return
         if order.status != STATUS_WAITING_SELLER_RELEASE:
             return
+        if self.autopilot.approved("release", oid):
+            message = self.autopilot.release(order, "Approved by you")
+            if message:
+                self.notify_once(oid, "release_approved", message)
+            return
         if (self.db.last_notice(oid) or "").startswith("paid:"):
             return  # already matched; the credit is claimed by this order
         window = self.s.payment_window_minutes * 60
@@ -136,9 +144,9 @@ class Bot:
         if result.decision == Decision.PAID and result.credit:
             if not self.db.mark_credit_used(result.credit.txn_id, oid):
                 return  # another order claimed it a moment ago; re-check next poll
-            self.notify_once(oid, f"paid:{result.credit.txn_id}",
-                             f"✅ SELL {oid}: payment confirmed. {result.reason}.\n"
-                             f"Phase 1: release the USDT yourself in Bybit.")
+            message = self.autopilot.release(order, result.reason)
+            if message:
+                self.notify_once(oid, f"paid:{result.credit.txn_id}", message)
         elif result.decision == Decision.REVIEW and result.credit:
             self.notify_once(oid, f"review:{result.credit.txn_id}",
                              f"⚠️ SELL {oid}: {result.reason}")
@@ -154,25 +162,9 @@ class Bot:
             return
         if order.status != STATUS_WAITING_BUYER_PAY:
             return
-        lines = [f"🔵 BUY {oid}: {summary} from {seller}. You need to pay."]
-        for term in order.payment_terms:
-            lines.append(self._check_payee(term.account_no, term.bank_name, order.seller_real_name))
-        if not order.payment_terms:
-            lines.append("No bank details on the order: check Bybit.")
-        lines.append("Phase 1: send the transfer yourself, then mark paid in Bybit.")
-        self.notify_once(oid, "buy_new", "\n".join(lines))
-
-    def _check_payee(self, account_no: str, bank_name: str, kyc_name: str) -> str:
-        try:
-            code = find_bank_code(bank_name, self.nomba.banks())
-            if not code:
-                return f"• {bank_name} {account_no}: bank not recognised, check by hand."
-            holder = self.nomba.lookup_account_name(account_no, code)
-        except (NombaError, requests.RequestException) as exc:
-            return f"• {bank_name} {account_no}: name lookup failed ({exc})."
-        level = compare_names(holder, kyc_name)
-        verdict = "OK" if level.value in ("exact", "strong") else "MISMATCH, don't pay until checked"
-        return f"• {bank_name} {account_no}: account name {holder!r} vs KYC {kyc_name!r} → {verdict}"
+        outcome = self.autopilot.handle_buy(order)
+        if outcome:
+            self.notify_once(oid, *outcome)
 
     def poll_orders(self) -> None:
         pending = self.bybit.pending_order_ids()
@@ -216,20 +208,63 @@ class Bot:
 
     # --- telegram commands ---
 
-    def status_text(self) -> str:
+    def status_text(self, _args: str = "") -> str:
         counts = self.db.order_counts()
         naira = "unknown" if self.naira_balance is None else f"₦{self.naira_balance}"
         usdt = "unknown" if self.usdt_balance is None else f"{self.usdt_balance} USDT"
-        mode = "MONITOR ONLY (no money moves)" if self.s.monitor_only else "LIVE"
+        a = self.s.auto
+        if self.s.monitor_only:
+            mode = "MONITOR ONLY (no money moves)"
+        elif self.autopilot.stopped:
+            mode = "LIVE, autopilot STOPPED (/go to resume)"
+        else:
+            on = [n for n, v in (("release", a.auto_release), ("pay", a.auto_pay),
+                                 ("refill", self.s.refill.auto_refill)) if v]
+            mode = f"LIVE, automatic: {', '.join(on) or 'nothing'}"
+        today = self.db.auto_total_today(("release", "pay"))
         return (f"Mode: {mode}\nNomba: {naira}\nBybit funding: {usdt}\n"
+                f"Handled automatically today: ₦{today} of ₦{a.daily_limit}\n"
+                f"Naira owed on open BUY orders: ₦{self.db.naira_owed()}\n"
                 f"Orders seen by status: {counts or 'none yet'}")
 
-    def pause_ads(self) -> str:
+    def stop_autopilot(self, _args: str = "") -> str:
+        self.autopilot.stop()
+        return "🛑 Autopilot STOPPED: no automatic releases, payments or refills. /go to resume."
+
+    def start_autopilot(self, _args: str = "") -> str:
+        self.autopilot.start()
+        return "▶️ Autopilot running again."
+
+    def approve_release(self, args: str) -> str:
+        order_id = args.strip()
+        if not order_id:
+            return "Usage: /release ORDER_ID"
+        if self.s.monitor_only:
+            return "MONITOR_ONLY is on, so the bot can't release. Release it in Bybit."
+        self.autopilot.approve("release", order_id)
+        return f"OK: releasing SELL {order_id} on the next check (a few seconds) if it's waiting for release."
+
+    def approve_pay(self, args: str) -> str:
+        order_id = args.strip()
+        if not order_id:
+            return "Usage: /pay ORDER_ID"
+        if self.s.monitor_only:
+            return "MONITOR_ONLY is on, so the bot can't pay. Pay by hand."
+        if self.db.payout(order_id):
+            return f"BUY {order_id} already has a payment; it won't be sent twice."
+        self.autopilot.approve("pay", order_id)
+        self.db.set_last_notice(order_id, "")  # let the next check report the payment
+        return f"OK: paying BUY {order_id} on the next check (a few seconds) if it's still waiting for payment."
+
+    def refill_now(self, _args: str = "") -> str:
+        return self.refiller.tick(self.naira_balance, self.usdt_balance, force=True) or "Nothing to refill."
+
+    def pause_ads(self, _args: str = "") -> str:
         self.ads.paused = True
         self.db.log("ads_paused", "paused from Telegram")
         return "⏸ Ad changes paused. Your ads stay as they are now. /resume to restart."
 
-    def resume_ads(self) -> str:
+    def resume_ads(self, _args: str = "") -> str:
         self.ads.paused = False
         self.db.log("ads_resumed", "resumed from Telegram")
         return "▶️ Ad management resumed."
@@ -239,18 +274,28 @@ class Bot:
         commands = {
             "/status": self.status_text,
             "/balance": self.status_text,
-            "/prices": self.ads.describe,
+            "/prices": lambda _args="": self.ads.describe(),
             "/pause": self.pause_ads,
             "/resume": self.resume_ads,
-            "/help": lambda: ("/status, /balance: balances and order counts\n"
-                              "/prices: current ad pricing plan\n"
-                              "/pause, /resume: stop or restart ad changes"),
+            "/stop": self.stop_autopilot,
+            "/go": self.start_autopilot,
+            "/release": self.approve_release,
+            "/pay": self.approve_pay,
+            "/refill": self.refill_now,
+            "/help": lambda _args="": (
+                "/status: balances, mode, today's totals\n"
+                "/stop, /go: halt or resume ALL automatic releases, payments and refills\n"
+                "/release ID: release a SELL order the bot held back\n"
+                "/pay ID: pay a BUY order the bot held back\n"
+                "/refill: try a naira refill now\n"
+                "/prices: ad pricing plan; /pause, /resume: ad changes"),
         }
         while True:
             try:
                 self.poll_orders()
                 self.check_balances()
                 self.ads.tick(self.naira_balance, self.usdt_balance)
+                self.refiller.tick(self.naira_balance, self.usdt_balance)
                 self.tg.handle_commands(commands)
             except Exception as exc:  # keep running; tell the owner
                 log.exception("Loop error")
@@ -282,6 +327,10 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     settings = load_settings()
     db = Database(settings.db_path)
+    r = settings.refill
+    withdrawer = (BybitP2PClient(r.bybit_withdraw_key, r.bybit_withdraw_secret, settings.bybit_base_url,
+                                 monitor_only=settings.monitor_only)
+                  if r.bybit_withdraw_key and r.bybit_withdraw_secret else None)
     bot = Bot(
         settings,
         BybitP2PClient(settings.bybit_api_key, settings.bybit_api_secret, settings.bybit_base_url,
@@ -290,6 +339,7 @@ def main() -> None:
                     settings.nomba_base_url, monitor_only=settings.monitor_only),
         db,
         Telegram(settings.telegram_bot_token, settings.telegram_chat_id),
+        withdrawer=withdrawer,
     )
     server = ThreadingHTTPServer((settings.webhook_host, settings.webhook_port), make_webhook_handler(bot))
     threading.Thread(target=server.serve_forever, daemon=True).start()

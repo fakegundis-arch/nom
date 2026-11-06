@@ -113,7 +113,43 @@ class NombaClient:
             "GET", "/v1/transactions/accounts/single", params={"transactionRef": transaction_ref}
         )
 
+    def get_transaction_by_reference(self, merchant_tx_ref: str) -> dict[str, Any]:
+        """Look up one of OUR transfers by the reference we gave it."""
+        return self._request(
+            "GET", "/v1/transactions/accounts/single", params={"merchantTxRef": merchant_tx_ref}
+        )
+
+    # --- Global Payout: currency wallets and exchange (USDT -> NGN refills) ---
+
+    @property
+    def sandbox(self) -> bool:
+        return "sandbox" in self.base_url
+
+    def currency_wallets(self) -> list[dict[str, Any]]:
+        path = "/v1/sandbox/global-payout/accounts" if self.sandbox else "/v1/global-payout/accounts"
+        data = self._request("GET", path)
+        return data if isinstance(data, list) else data.get("results", [])
+
+    def quote_conversion(self, amount: Decimal, currency: str, to_currency: str) -> dict[str, Any]:
+        """Lock a rate. Returns toAmount, feeAmount and exchangeRateId."""
+        return self._request("POST", "/v1/global-payout/money/convert", json={
+            "amount": float(amount), "currency": currency,
+            "destinationCurrency": to_currency, "transactionType": "EXCHANGE",
+        })
+
     # --- money-moving calls (blocked while monitor_only) ---
+
+    def exchange(self, amount: Decimal, from_currency: str, to_currency: str, rate_id: str,
+                 name: str, country: str, idempotency_key: str) -> dict[str, Any]:
+        """Convert between your own Nomba wallets at a locked rate."""
+        if self.monitor_only:
+            raise NombaError("Refusing to convert: MONITOR_ONLY is on")
+        return self._request("POST", "/v1/global-payout/exchange/authorize", json={
+            "amount": float(amount), "sourceCurrency": from_currency, "destinationCurrency": to_currency,
+            "senderName": name, "receiverName": name, "sourceCountryIsoCode": country,
+            "destinationCountryIsoCode": "NG", "lockedExchangeRateId": rate_id,
+            "idempotencyKey": idempotency_key, "narration": "P2P naira refill",
+        })
 
     def transfer_to_bank(self, amount: Decimal, account_number: str, account_name: str,
                          bank_code: str, reference: str, narration: str) -> dict[str, Any]:

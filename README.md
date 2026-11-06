@@ -144,9 +144,28 @@ p2pbot/
   db.py            SQLite: orders, credits, audit log
   telegram.py      alerts and commands
   config.py        settings from .env
-tests/             78 tests, including Nomba's documented webhook signature vector
+  check.py         `python -m p2pbot.check`: test your Nomba setup
+tests/             84 tests, including Nomba's documented webhook signature vector
 docs/DEPLOY.md     VPS setup step by step
 ```
+
+## Check your Nomba setup (safe, no Bybit)
+
+```bash
+python -m p2pbot.check                                    # all checks
+python -m p2pbot.check --account 0123456789 --bank-code 058   # look up / pay a specific test account
+python -m p2pbot.check --no-transfer                      # read-only
+python -m p2pbot.check --convert                          # also try 1 USDT -> NGN
+```
+
+It needs only the `NOMBA_*` settings (and `BUSINESS_NAME` for `--convert`) and
+never touches Bybit. It logs in, reads the balance, lists banks, looks up an
+account name, sends a test transfer and checks it by reference, looks for a
+USDT wallet and gets a USDT -> NGN quote. Each step shows ✅ / ❌ / ⏭ with the
+reason. The test transfer and conversion only run against Nomba's
+**sandbox**; with live Nomba keys those steps are skipped.
+
+With Docker on the VPS: `docker compose run --rm bot python -m p2pbot.check`.
 
 ## Run the tests
 

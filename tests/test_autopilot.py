@@ -359,3 +359,73 @@ def test_withdraw_is_blocked_in_monitor_only():
     with pytest.raises(NombaError):
         from p2pbot.nomba_client import NombaClient
         NombaClient("c", "s", "a", "https://x").exchange(D("1"), "USDT", "NGN", "r", "n", "NG", "k")
+
+
+# --- reacting right after a trade, not only on the timers ---
+
+class BalanceNomba(FakeNomba):
+    def __init__(self, balance):
+        super().__init__(balance)
+        self.balance_calls = 0
+
+    def balance(self):
+        self.balance_calls += 1
+        return self.balance_value
+
+
+class BalanceBybit(FakeBybit):
+    def __init__(self, orders):
+        super().__init__()
+        self.orders = orders
+
+    def usdt_funding_balance(self):
+        return D("1000")
+
+    def pending_order_ids(self):
+        return [o.order_id for o in self.orders.values() if o.status in (STATUS_WAITING_BUYER_PAY,
+                                                                        STATUS_WAITING_SELLER_RELEASE)]
+
+    def order_detail(self, order_id):
+        return self.orders[order_id]
+
+
+def test_finished_trade_triggers_balance_check_and_refill_at_once():
+    from p2pbot.bybit_client import STATUS_FINISHED
+    nomba = BalanceNomba(balance="2500000")
+    nomba.wallets[1]["availableBalance"] = 800
+    bot = live_bot(refill=RefillSettings(**{**REFILL.__dict__, "check_seconds": 3600}), nomba=nomba)
+    order = buy(status=STATUS_WAITING_SELLER_RELEASE, amount="632000")
+    bot.bybit = BalanceBybit({"b1": order})
+    bot.ads.bybit = bot.bybit
+
+    # Normal start: balances read, naira is fine, refill timer starts (1 hour).
+    bot.check_balances(now=True)
+    bot.refiller.tick(bot.naira_balance, bot.usdt_balance)
+    bot.poll_orders()
+    assert nomba.exchanges == []
+
+    # The trade finishes and Nomba has dropped to ₦300k (the seller was paid).
+    nomba.balance_value = D("300000")
+    order.status = STATUS_FINISHED
+    bot.poll_orders()
+    assert bot._balances_changed.is_set()
+    calls_before = nomba.balance_calls
+    bot.after_trade()
+
+    # No waiting for the 60s balance timer or the 1-hour refill timer.
+    assert nomba.balance_calls == calls_before + 1
+    assert bot.naira_balance == D("300000")
+    assert len(nomba.exchanges) == 1
+    assert any("FREE NAIRA low" in m for m in bot.tg.sent)
+
+
+def test_incoming_payment_also_triggers_a_refresh():
+    bot = live_bot()
+    deliver(bot)
+    assert bot._balances_changed.is_set()
+
+
+def test_payment_to_seller_triggers_a_refresh():
+    bot = live_bot(auto=AutoSettings(auto_pay=True, max_order=D("1000000"), new_counterparty_max=D("1000000")))
+    bot.process_order(buy())
+    assert bot._balances_changed.is_set()

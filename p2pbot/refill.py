@@ -66,8 +66,11 @@ class Refiller:
             return False, "autopilot stopped"
         return True, ""
 
-    def tick(self, naira_balance: Decimal | None, usdt_on_bybit: Decimal | None, force: bool = False) -> str:
-        if not force and time.time() - self._last_run < self.cfg.check_seconds:
+    def tick(self, naira_balance: Decimal | None, usdt_on_bybit: Decimal | None, force: bool = False,
+             now: bool = False) -> str:
+        """`now` skips the timer (used right after a trade); `force` also refills
+        when naira isn't low (the /refill command)."""
+        if not (force or now) and time.time() - self._last_run < self.cfg.check_seconds:
             return ""
         self._last_run = time.time()
         ok, why = self.enabled()

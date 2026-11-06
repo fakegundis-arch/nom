@@ -46,6 +46,9 @@ class Bot:
         self.naira_balance: Decimal | None = None
         self.usdt_balance: Decimal | None = None
         self._last_balance_check = 0.0
+        # Set when a trade or payment changed the balances; the main loop then
+        # re-checks balances, ads and refill straight away instead of waiting.
+        self._balances_changed = threading.Event()
         self.webhook_tolerance: float | None = webhook.TOLERANCE_SECONDS
         self.ads = AdManager(settings.ads, bybit, db, telegram,
                              settings.naira_low_threshold, settings.usdt_low_threshold)
@@ -95,13 +98,18 @@ class Bot:
                               credit.received_at, event):
             self.db.log("credit", f"₦{amount} from {credit.sender_name} ({credit.sender_bank})")
             self.tg.send(f"💰 ₦{amount} received from {credit.sender_name} ({credit.sender_bank}).")
+            self._balances_changed.set()
         return 200
 
     # --- orders ---
 
     def process_order(self, order: P2POrder) -> None:
-        self.db.upsert_order(order.order_id, order.side, order.status, order.amount, order.quantity,
-                             order.price, order.counterparty_real_name, order.created_ms)
+        previous = self.db.upsert_order(order.order_id, order.side, order.status, order.amount, order.quantity,
+                                        order.price, order.counterparty_real_name, order.created_ms)
+        if previous is not None and previous != order.status and order.status in (STATUS_CANCELLED, STATUS_FINISHED):
+            # A trade just closed: naira or USDT moved, and naira reserved for
+            # it may be free again. Get ready for the next order now.
+            self._balances_changed.set()
         oid = order.order_id
         who = order.counterparty_real_name or order.counterparty_nickname
         summary = f"{order.quantity} {order.token} @ ₦{order.price} = ₦{order.amount}"
@@ -132,6 +140,7 @@ class Bot:
             return
         if self.autopilot.approved("release", oid):
             message = self.autopilot.release(order, "Approved by you")
+            self._balances_changed.set()
             if message:
                 self.notify_once(oid, "release_approved", message)
             return
@@ -145,6 +154,7 @@ class Bot:
             if not self.db.mark_credit_used(result.credit.txn_id, oid):
                 return  # another order claimed it a moment ago; re-check next poll
             message = self.autopilot.release(order, result.reason)
+            self._balances_changed.set()
             if message:
                 self.notify_once(oid, f"paid:{result.credit.txn_id}", message)
         elif result.decision == Decision.REVIEW and result.credit:
@@ -164,6 +174,8 @@ class Bot:
             return
         outcome = self.autopilot.handle_buy(order)
         if outcome:
+            if outcome[0] in ("paid_marked", "payout_pending", "payout_unclear"):
+                self._balances_changed.set()  # naira just left Nomba
             self.notify_once(oid, *outcome)
 
     def poll_orders(self) -> None:
@@ -181,13 +193,15 @@ class Bot:
 
     # --- balances ---
 
-    def check_balances(self) -> None:
-        if time.time() - self._last_balance_check < BALANCE_CHECK_SECONDS:
+    def check_balances(self, now: bool = False) -> None:
+        if not now and time.time() - self._last_balance_check < BALANCE_CHECK_SECONDS:
             return
         self._last_balance_check = time.time()
         try:
             self.naira_balance = self.nomba.balance()
-            self._low_alert("naira", self.naira_balance, self.s.naira_low_threshold, "₦")
+            # Free naira: what's left after paying sellers on orders already open.
+            self._low_alert("free naira", self.naira_balance - self.db.naira_owed(),
+                            self.s.naira_low_threshold, "₦")
         except (NombaError, requests.RequestException) as exc:
             log.warning("Nomba balance failed: %s", exc)
         try:
@@ -205,6 +219,18 @@ class Bot:
         elif was_low and not is_low:
             self.tg.send(f"📈 {name.upper()} back above alert level: {unit}{value}.")
         self.db.set_flag(key, "1" if is_low else "0")
+
+    def after_trade(self) -> None:
+        """Right after money moved: re-read balances, then let the ad manager and
+        the refiller react at once, so the bot is ready before the next order."""
+        self._balances_changed.clear()
+        self.check_balances(now=True)
+        if self.naira_balance is not None:
+            free = self.naira_balance - self.db.naira_owed()
+            usdt = "unknown" if self.usdt_balance is None else f"{self.usdt_balance} USDT"
+            self.db.log("after_trade", f"Nomba ₦{self.naira_balance} (free ₦{free}), Bybit {usdt}")
+        self.ads.tick(self.naira_balance, self.usdt_balance, now=True)
+        self.refiller.tick(self.naira_balance, self.usdt_balance, now=True)
 
     # --- telegram commands ---
 
@@ -294,6 +320,8 @@ class Bot:
             try:
                 self.poll_orders()
                 self.check_balances()
+                if self._balances_changed.is_set():
+                    self.after_trade()
                 self.ads.tick(self.naira_balance, self.usdt_balance)
                 self.refiller.tick(self.naira_balance, self.usdt_balance)
                 self.tg.handle_commands(commands)

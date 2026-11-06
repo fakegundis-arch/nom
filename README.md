@@ -65,6 +65,13 @@ below `NAIRA_LOW_THRESHOLD`:
    `USDT_LOW_THRESHOLD` on Bybit), then converts it when it lands.
 3. Otherwise it tells you to move USDT yourself.
 
+**It reacts right after each trade, not only on timers.** As soon as an order
+completes or is cancelled, the bot pays a seller, releases USDT, or naira
+arrives, it re-reads both balances and immediately re-runs the ad manager and
+the refill. So if a trade leaves naira low, the BUY ad is shrunk or paused and
+the refill starts *before* the next seller opens an order. (The regular checks
+every 60 seconds / `REFILL_CHECK_SECONDS` still run as a backup.)
+
 This uses Nomba's Global Payout endpoints (`/v1/global-payout/money/convert`
 and `/v1/global-payout/exchange/authorize`), as in Nomba's official SDK.
 **Confirm with Nomba that your account has a USDT wallet** and test it in the
@@ -137,7 +144,7 @@ p2pbot/
   db.py            SQLite: orders, credits, audit log
   telegram.py      alerts and commands
   config.py        settings from .env
-tests/             75 tests, including Nomba's documented webhook signature vector
+tests/             78 tests, including Nomba's documented webhook signature vector
 docs/DEPLOY.md     VPS setup step by step
 ```
 

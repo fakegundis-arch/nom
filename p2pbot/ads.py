@@ -161,8 +161,9 @@ class AdManager:
                 ads.setdefault(int(ad["side"]), ad)
         return ads
 
-    def tick(self, naira_balance: Decimal | None, usdt_balance: Decimal | None) -> None:
-        if time.time() - self._last_run < self.cfg.reprice_seconds:
+    def tick(self, naira_balance: Decimal | None, usdt_balance: Decimal | None, now: bool = False) -> None:
+        """`now` skips the timer: used right after a trade changes the balances."""
+        if not now and time.time() - self._last_run < self.cfg.reprice_seconds:
             return
         self._last_run = time.time()
         ok, why = self.enabled()

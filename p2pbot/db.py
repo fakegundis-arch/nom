@@ -92,6 +92,16 @@ class Database:
     def set_last_notice(self, order_id: str, notice: str) -> None:
         self._exec("UPDATE orders SET last_notice = ? WHERE order_id = ?", (notice, order_id))
 
+    def naira_owed(self) -> Decimal:
+        """Naira we must still pay on BUY orders waiting for our payment."""
+        rows = self._exec("SELECT amount FROM orders WHERE side = 0 AND status = 10")
+        return sum((Decimal(r["amount"]) for r in rows), Decimal("0"))
+
+    def open_order_ids(self) -> list[str]:
+        """Orders we last saw in progress (waiting for payment or release)."""
+        rows = self._exec("SELECT order_id FROM orders WHERE status IN (10, 20)")
+        return [r["order_id"] for r in rows]
+
     def order_counts(self) -> dict[int, int]:
         rows = self._exec("SELECT status, COUNT(*) AS n FROM orders GROUP BY status")
         return {r["status"]: r["n"] for r in rows}

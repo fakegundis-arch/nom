@@ -20,7 +20,32 @@ run. The bot watches and tells you what to do on Telegram:
 | Naira or USDT balance gets low | 📉 alert (and 📈 when it recovers) |
 | Any naira credit into Nomba | 💰 alert |
 
-Telegram commands (only from your own chat): `/status`, `/balance`, `/help`.
+Telegram commands (only from your own chat): `/status`, `/balance`,
+`/prices`, `/pause`, `/resume`, `/help`.
+
+## Ad pricing and inventory
+
+Every minute the bot looks at everyone's USDT/NGN ads and works out prices
+for your own BUY and SELL ads:
+
+- **Competitive:** beats the merchant at your `TARGET_RANK` by `PRICE_STEP`
+  (e.g. rank 2, ₦1). Tiny "bait" ads are ignored.
+- **Never past your limits:** never sells below `SELL_MIN_PRICE`, never buys
+  above `BUY_MAX_PRICE`, and always keeps at least `MIN_SPREAD` between your
+  sell and buy price so each round trip makes money.
+- **Only offers naira you have:** the BUY ad's maximum order is set to your
+  Nomba balance minus naira you still owe on open BUY orders, minus
+  `NAIRA_BUFFER`.
+- **Refills naira automatically:** when naira gets low, the BUY ad goes
+  offline and the SELL ad moves to the #1 price so buyers bring naira in.
+  When naira recovers, the BUY ad comes back. Low USDT does the opposite.
+
+With `AUTO_ADS=false` (the default) it only **suggests** changes on Telegram
+(at most every 10 minutes). Set `AUTO_ADS=true` to let it edit your ads.
+Editing ads never moves money. `/pause` stops all ad changes at once.
+
+Your ads must use a **fixed price** for repricing; the bot leaves floating-price
+ads alone and tells you.
 
 ## Safety rules built in
 
@@ -41,14 +66,15 @@ Telegram commands (only from your own chat): `/status`, `/balance`, `/help`.
 ```
 p2pbot/
   bot.py           main loop, webhook listener, alerts
-  bybit_client.py  Bybit P2P API (signed requests)
+  ads.py           ad repricing and naira/USDT inventory
+  bybit_client.py  Bybit P2P API (signed requests; paths from Bybit's pybit SDK)
   nomba_client.py  Nomba API (token, balance, name lookup, transactions, transfers)
   webhook.py       Nomba webhook signature check and parsing
   matcher.py       payment matching and name comparison
   db.py            SQLite: orders, credits, audit log
   telegram.py      alerts and commands
   config.py        settings from .env
-tests/             31 tests, including Nomba's documented webhook signature vector
+tests/             49 tests, including Nomba's documented webhook signature vector
 docs/DEPLOY.md     VPS setup step by step
 ```
 
@@ -71,5 +97,6 @@ See [docs/DEPLOY.md](docs/DEPLOY.md).
 3. Check these against Nomba's and Bybit's live docs (they were taken from
    official SDKs and docs, but not yet tried against a live account):
    - Bybit order fields (`buyerRealName`, `sellerRealName`, `paymentTermList`) and status codes.
-   - Bybit order detail path `/v5/p2p/order/info`.
+   - Bybit ad fields (`priceType` 0 = fixed, `paymentTerms[].id`, `lastQuantity`,
+     `userId` on online ads) and the ad list's `tokenId`/`currencyId`/`side`.
    - Nomba transaction status values (`SUCCESS`, `PAYMENT_SUCCESSFUL`).

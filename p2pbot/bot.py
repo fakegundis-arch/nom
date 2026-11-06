@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import requests
 
 from . import webhook
+from .ads import AdManager
 from .bybit_client import (SIDE_BUY, SIDE_SELL, STATUS_APPEALING, STATUS_CANCELLED, STATUS_FINISHED,
                            STATUS_WAITING_BUYER_PAY, STATUS_WAITING_SELLER_RELEASE, BybitError,
                            BybitP2PClient, P2POrder)
@@ -53,6 +54,8 @@ class Bot:
         self.usdt_balance: Decimal | None = None
         self._last_balance_check = 0.0
         self.webhook_tolerance: float | None = webhook.TOLERANCE_SECONDS
+        self.ads = AdManager(settings.ads, bybit, db, telegram,
+                             settings.naira_low_threshold, settings.usdt_low_threshold)
 
     # --- alerts ---
 
@@ -172,8 +175,17 @@ class Bot:
         return f"• {bank_name} {account_no}: account name {holder!r} vs KYC {kyc_name!r} → {verdict}"
 
     def poll_orders(self) -> None:
-        for order_id in self.bybit.pending_order_ids():
+        pending = self.bybit.pending_order_ids()
+        # Orders that dropped off the pending list finished or were cancelled:
+        # fetch them once more so they stop counting as naira we owe.
+        stale = [oid for oid in self.db.open_order_ids() if oid not in pending]
+        for order_id in pending:
             self.process_order(self.bybit.order_detail(order_id))
+        for order_id in stale:
+            try:
+                self.process_order(self.bybit.order_detail(order_id))
+            except (BybitError, requests.RequestException) as exc:
+                log.warning("Could not refresh order %s: %s", order_id, exc)
 
     # --- balances ---
 
@@ -212,17 +224,33 @@ class Bot:
         return (f"Mode: {mode}\nNomba: {naira}\nBybit funding: {usdt}\n"
                 f"Orders seen by status: {counts or 'none yet'}")
 
+    def pause_ads(self) -> str:
+        self.ads.paused = True
+        self.db.log("ads_paused", "paused from Telegram")
+        return "⏸ Ad changes paused. Your ads stay as they are now. /resume to restart."
+
+    def resume_ads(self) -> str:
+        self.ads.paused = False
+        self.db.log("ads_resumed", "resumed from Telegram")
+        return "▶️ Ad management resumed."
+
     def run_forever(self) -> None:
         self.tg.send(f"🤖 Bot started. {self.status_text()}")
         commands = {
             "/status": self.status_text,
             "/balance": self.status_text,
-            "/help": lambda: "/status, /balance: balances and order counts. Phase 1 only watches and alerts.",
+            "/prices": self.ads.describe,
+            "/pause": self.pause_ads,
+            "/resume": self.resume_ads,
+            "/help": lambda: ("/status, /balance: balances and order counts\n"
+                              "/prices: current ad pricing plan\n"
+                              "/pause, /resume: stop or restart ad changes"),
         }
         while True:
             try:
                 self.poll_orders()
                 self.check_balances()
+                self.ads.tick(self.naira_balance, self.usdt_balance)
                 self.tg.handle_commands(commands)
             except Exception as exc:  # keep running; tell the owner
                 log.exception("Loop error")

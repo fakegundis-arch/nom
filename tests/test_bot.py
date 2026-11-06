@@ -170,3 +170,33 @@ def test_bybit_signature():
     import hashlib, hmac
     expected = hmac.new(b"secret", b"1700000000000key5000{}", hashlib.sha256).hexdigest()
     assert sign("secret", "1700000000000", "key", "5000", "{}") == expected
+
+
+class FakeBybit:
+    def __init__(self, pending, details):
+        self.pending, self.details = pending, details
+
+    def pending_order_ids(self):
+        return self.pending
+
+    def order_detail(self, order_id):
+        return self.details[order_id]
+
+
+def buy_order(order_id, status, amount):
+    return P2POrder(order_id, SIDE_BUY, status, "USDT", "NGN", Decimal("1580"), Decimal("1"),
+                    Decimal(amount), "Me", "Seller", "nick", ORDER_MS, [])
+
+
+def test_naira_owed_counts_unpaid_buy_orders_and_clears_when_they_close():
+    bot = make_bot()
+    bot.bybit = FakeBybit(["b1", "b2"], {"b1": buy_order("b1", STATUS_WAITING_BUYER_PAY, "300000"),
+                                         "b2": buy_order("b2", STATUS_WAITING_BUYER_PAY, "200000")})
+    bot.poll_orders()
+    assert bot.db.naira_owed() == Decimal("500000")
+    # b2 is cancelled and drops off the pending list: it must stop counting.
+    from p2pbot.bybit_client import STATUS_CANCELLED
+    bot.bybit = FakeBybit(["b1"], {"b1": buy_order("b1", STATUS_WAITING_BUYER_PAY, "300000"),
+                                   "b2": buy_order("b2", STATUS_CANCELLED, "200000")})
+    bot.poll_orders()
+    assert bot.db.naira_owed() == Decimal("300000")

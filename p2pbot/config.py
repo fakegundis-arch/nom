@@ -19,6 +19,27 @@ def _bool(name: str, default: bool) -> bool:
 
 
 @dataclass(frozen=True)
+class AdSettings:
+    """Ad repricing and inventory. Prices are naira per USDT."""
+
+    # Off: the bot only suggests ad changes on Telegram. On: it edits your ads.
+    # Editing ads never moves money, so this is separate from MONITOR_ONLY.
+    auto_ads: bool = False
+    # Hard limits. Repricing stays off until both are set.
+    sell_min_price: Decimal = Decimal("0")   # never sell USDT cheaper than this
+    buy_max_price: Decimal = Decimal("0")    # never buy USDT dearer than this
+    min_spread: Decimal = Decimal("15")      # sell price stays at least this far above buy price
+    price_step: Decimal = Decimal("1")       # how much to beat a competitor by
+    target_rank: int = 2                     # 1 = best price on the page, 2 = second best...
+    reprice_seconds: int = 60
+    min_competitor_usdt: Decimal = Decimal("50")  # ignore tiny "bait" ads
+    naira_buffer: Decimal = Decimal("100000")     # naira the BUY ad never offers
+    buy_max_order: Decimal = Decimal("0")         # cap on one BUY order in naira (0 = no cap)
+    token: str = "USDT"
+    currency: str = "NGN"
+
+
+@dataclass(frozen=True)
 class Settings:
     # Bybit
     bybit_api_key: str
@@ -50,6 +71,23 @@ class Settings:
     # this is True.
     monitor_only: bool
 
+    ads: AdSettings = AdSettings()
+
+
+def load_ad_settings() -> AdSettings:
+    return AdSettings(
+        auto_ads=_bool("AUTO_ADS", False),
+        sell_min_price=Decimal(_get("SELL_MIN_PRICE", "0")),
+        buy_max_price=Decimal(_get("BUY_MAX_PRICE", "0")),
+        min_spread=Decimal(_get("MIN_SPREAD", "15")),
+        price_step=Decimal(_get("PRICE_STEP", "1")),
+        target_rank=int(_get("TARGET_RANK", "2")),
+        reprice_seconds=int(_get("REPRICE_SECONDS", "60")),
+        min_competitor_usdt=Decimal(_get("MIN_COMPETITOR_USDT", "50")),
+        naira_buffer=Decimal(_get("NAIRA_BUFFER", "100000")),
+        buy_max_order=Decimal(_get("BUY_MAX_ORDER", "0")),
+    )
+
 
 def load_settings() -> Settings:
     load_dotenv()
@@ -73,4 +111,5 @@ def load_settings() -> Settings:
         naira_low_threshold=Decimal(_get("NAIRA_LOW_THRESHOLD", "500000")),
         usdt_low_threshold=Decimal(_get("USDT_LOW_THRESHOLD", "300")),
         monitor_only=_bool("MONITOR_ONLY", True),
+        ads=load_ad_settings(),
     )

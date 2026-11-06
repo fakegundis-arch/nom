@@ -156,6 +156,30 @@ class BybitP2PClient:
                 return Decimal(str(item.get("transferBalance") or item.get("walletBalance") or "0"))
         return Decimal("0")
 
+    # --- ads (endpoints as in Bybit's official pybit SDK) ---
+
+    def my_user_id(self) -> str:
+        return str(self._post("/v5/p2p/user/personal/info", {}).get("userId", ""))
+
+    def my_ads(self) -> list[dict[str, Any]]:
+        return self._post("/v5/p2p/item/personal/list", {}).get("items") or []
+
+    def ad_detail(self, item_id: str) -> dict[str, Any]:
+        return self._post("/v5/p2p/item/info", {"itemId": item_id})
+
+    def online_ads(self, token: str, currency: str, side: int) -> list[dict[str, Any]]:
+        """Everyone's live ads on one side. side 0 = ads that buy USDT, 1 = ads that sell USDT."""
+        body = {"tokenId": token, "currencyId": currency, "side": str(side), "page": "1", "size": "30"}
+        return self._post("/v5/p2p/item/online", body).get("items") or []
+
+    def update_ad(self, body: dict[str, Any]) -> None:
+        """Edit (actionType MODIFY) or relist (actionType ACTIVE) an ad. Changes
+        prices and limits only; it never moves money, so it isn't blocked by monitor_only."""
+        self._post("/v5/p2p/item/update", body)
+
+    def take_ad_offline(self, item_id: str) -> None:
+        self._post("/v5/p2p/item/cancel", {"itemId": item_id})
+
     # --- money-moving calls (blocked while monitor_only) ---
 
     def _guard(self, action: str) -> None:
